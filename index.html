@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>You could have invented domains</title>
+  <meta name="description" content="A framework for easily creating beautiful presentations using HTML">
+  <meta name="author" content="Hakim El Hattab">
+
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+
+  <link rel="stylesheet" href="css/reveal.css">
+  <link rel="stylesheet" href="css/theme/default.css" id="theme">
+
+  <!-- For syntax highlighting -->
+  <link rel="stylesheet" href="lib/css/solarized-dark.css">
+
+  <!-- If the query includes 'print-pdf', use the PDF print sheet -->
+  <script>
+    document.write('<link rel="stylesheet" href="css/print/' +
+                   (window.location.search.match(/print-pdf/gi) ? 'pdf' : 'paper') +
+                   '.css" type="text/css" media="print">');
+  </script>
+
+  <!--[if lt IE 9]>
+  <script src="lib/js/html5shiv.js"></script>
+  <![endif]-->
+</head>
+<body>
+<div class="reveal">
+  <div class="slides">
+    <section>
+      <section>
+        <h1>You could have invented domains</h1>
+        <h3>(and I needed to)</h3>
+      </section>
+
+      <section>
+        <h2>Who am I?</h2>
+        <ul>
+          <li>working with Node.js for a year and a half</li>
+          <li>building Node.js instrumentation for New Relic</li>
+          <li>generally a glutton for punishment</li>
+        </ul>
+      </section>
+
+      <section>
+        <h2>What's in this talk?</h2>
+        <ul>
+          <li>Error handling in JavaScript</li>
+          <li>...with complications provided by Node.js</li>
+          <li>the how and why of domains</li>
+          <li>domains as generic per-request state</li>
+        </ul>
+      </section>
+
+      <section>
+        <h2>What's my angle?</h2>
+        <p>I needed a good way of tying information about a request-response cycle
+           to a specific transaction so I could create useful transaction traces
+           for New Relic.</p>
+      </section>
+    </section>
+
+    <section>
+      <section>
+        <h3>Basic error handling in JavaScript</h3>
+        <p>Exceptions are part of JavaScript, and will do basically what you expect:</p>
+        <pre><code class="javascript" contenteditable>
+var object;
+// will throw with a useful stacktrace
+console.log(object.field);
+        </code></pre>
+      </section>
+
+      <section>
+        <h3>Basic error handling in JavaScript</h3>
+        <p>Easily caught with <code>try</code> / <code>catch</code>:</p>
+        <pre><code class="javascript" contenteditable>
+var object;
+try {
+  console.log(object.field);
+}
+catch (error) {
+  console.error("got an error: %s", error);
+}
+        </code></pre>
+      </section>
+    </section>
+
+    <section>
+      <h3>But Node.js is asynchronous</h3>
+      <p>What happens when you run this?</p>
+      <pre><code class="javascript" contenteditable>
+var object;
+try {
+  process.nextTick(function () {
+    console.log(object.field);
+  });
+}
+catch (error) {
+  console.error("got an error: %s", error);
+}
+      </code></pre>
+      <p><i>(hint: nothing good)</i></p>
+    </section>
+
+    <section>
+      <section>
+        <h3>A more typical example</h3>
+        <pre><code class="javascript" contenteditable>
+var http = require('http');
+
+var server = http.createServer(function (req, res) {
+  res.send("&lt;html&gt;&lt;head&gt;&lt;title&gt;page&lt;/title&gt;" +
+           "&lt;body&gt;yo dawg I heard u like HTML&lt;/body&gt;&lt;/html&gt;");
+});
+
+server.listen(8080);
+        </code></pre>
+        <p>…especially in that it's not immediately obvious what's wrong.</p>
+      </section>
+
+      <section>
+        <h3>the uncaught exception handler</h3>
+        <pre><code class="javascript" contenteditable>
+process.on('uncaughtException', function (error) {
+  console.error("got an error, no idea where it came from: %s", error);
+});
+
+var http = require('http');
+
+var server = http.createServer(function (req, res) {
+  res.send("&lt;html&gt;&lt;head&gt;&lt;title&gt;page&lt;/title&gt;" +
+           "&lt;body&gt;yo dawg I heard u like HTML&lt;/body&gt;&lt;/html&gt;");
+});
+
+server.listen(8080);
+        </code></pre>
+        <p>…well, at least your entire app no longer crashes. (Note: the uncaught
+        exception handler actually lives inside V8.)</p>
+      </section>
+    </section>
+
+    <section>
+      <section>
+        <h2>Node.js conventions</h2>
+        <ul>
+          <li>only use exceptions for "fail-fast" (internal) errors</li>
+          <li>back in the old days, <code>callback</code> / <code>errorback</code>
+              convention was popular</li>
+          <li>now conventionalized to first parameter of callback being reserved
+              for errors</li>
+        </ul>
+      </section>
+
+      <section>
+        <h2>Node.js conventions</h2>
+        <pre><code class="javascript" contenteditable>
+var request = require('request');
+
+request('http://example.cob/', function (error, response, body) {
+  if (error) return console.error("error fetching data: %s", error);
+
+  console.error("body: %s", body);
+});
+        </code></pre>
+      </section>
+    </section>
+
+    <section>
+      <h1>domains</h1>
+    </section>
+
+    <section>
+      <h2>domain facts</h2>
+      <ul>
+        <li>simple API for adding context to actions</li>
+        <li>incredibly poorly named</li>
+        <li>little bits of code throughout Node's source to enable more transparent
+        error handling</li>
+        <li><b>Only available in Node.js 0.8+</b></li>
+      </ul>
+    </section>
+
+    <section>
+      <section>
+        <p>So before we had this:</p>
+        <pre><code class="javascript" contenteditable>
+var http = require('http');
+
+var server = http.createServer(function (req, res) {
+  res.send("&lt;html&gt;&lt;head&gt;&lt;title&gt;page&lt;/title&gt;" +
+           "&lt;body&gt;yo dawg I heard u like HTML&lt;/body&gt;&lt;/html&gt;");
+});
+
+server.listen(8080);
+      </code></pre>
+    </section>
+
+    <section>
+      <p>and now we have this:</p>
+      <pre><code class="javascript" contenteditable>
+var http = require('http'), domain = require('domain');
+
+var server = http.createServer(function (req, res) {
+  var handlerDomain = domain.create();
+  handlerDomain.on('error', function (error) {
+    console.error('Oh! Request handler for URL %s got error: %s',
+                  req.url, error);
+    res.statusCode = 500;
+    res.end();
+  });
+  handlerDomain.run(function () {
+    res.send("&lt;html&gt;&lt;head&gt;&lt;title&gt;page&lt;/title&gt;" +
+             "&lt;body&gt;yo dawg I heard u like HTML&lt;/body&gt;&lt;/html&gt;");
+  });
+});
+server.listen(8080);
+      </code></pre>
+    </section>
+
+    <section>
+      <h3>Points of interest:</h3>
+      <ol>
+        <li>each invocation gets its own error handling</li>
+        <li>can scope cleanup to the specific action</li>
+        <li>no longer need to rely on stack traces</li>
+      </ol>
+    </section>
+  </section>
+
+  <section>
+    <section>
+      <p>If you have a callback following the conventions:</p>
+      <pre><code class="javascript" contenteditable>
+var request = require('request');
+
+request('http://example.cob/', function (error, response, body) {
+  if (error) {
+    return console.error("error fetching data: %s", error);
+  }
+
+  console.error("body: %s", body);
+});
+      </code></pre>
+    </section>
+
+    <section>
+      <p>You can now use <code>domain.intercept()</code>:
+      <pre><code class="javascript" contenteditable>
+var request = require('request'), domain = require('domain');
+
+var rd = domain.create();
+rd.on('error', function (error) {
+  console.log("error fetching data: %s", error);
+});
+
+request('http://example.cob/',
+        rd.intercept(function (response, body) {
+  console.error("body: %s", body);
+}));
+      </code></pre>
+    </section>
+  </section>
+
+  <section>
+    <section>
+      <h2>What about Event Emitters?</h2>
+      <ul>
+        <li>accounts for most of Isaac's work on domains</li>
+        <li>covers most everything</li>
+        <li>…except for a few caveats, covered later</li>
+      </ul>
+    </section>
+
+    <section>
+      <p>This…</p>
+      <pre><code class="javascript" contenteditable>
+var object;
+var handle = setInterval(function () {
+  console.error("value of object.field: %s", object.field);
+}, 500);
+      </code></pre>
+    </section>
+
+    <section>
+      <p>…becomes this:</p>
+      <pre><code class="javascript" contenteditable>
+var domain = require('domain'), util = require('util');
+
+var d = domain.create();
+d.on('error', function (error) {
+  console.error("Got error: %s", error);
+  console.error("error.domain: %s", util.inspect(error.domain));
+});
+
+var object;
+var handle = setInterval(function () {
+  console.error("value of object.field: %s", object.field);
+}, 500);
+
+d.add(handle);
+      </code></pre>
+    </section>
+
+    <section>
+      <p>…or this:</p>
+      <pre><code class="javascript" contenteditable>
+var domain = require('domain'), util = require('util');
+
+var d = domain.create();
+d.on('error', function (error) {
+  console.error("Got error: %s", error);
+  console.error("error.domain: %s", util.inspect(error.domain));
+});
+
+var object;
+var handle = setInterval(d.bind(function () {
+  console.error("value of object.field: %s", object.field);
+}), 500);
+      </code></pre>
+    </section>
+  </section>
+
+  <section>
+    <h1>Under the hood</h1>
+  </section>
+
+  <section>
+    <section>
+      <h2>How does all this work?</h2>
+      <ul>
+        <li>Node.js is single-threaded</li>
+        <li><code>-</code> no thread-local storage</li>
+        <li><code>+</code> many fewer race conditions</li>
+      </ul>
+      <p></p>
+      <p>This means we can create a shared request-local state.</p>
+    </section>
+
+    <section>
+      <p>The domain is a simple object, and when it's active, it's stored in two places:</p>
+      <pre><code class="javascript" contenteditable>
+// what you should use if you're writing domain-aware applications
+domain.active;
+
+// the one library authors will actually want to use most often
+process.domain;
+      </code></pre>
+    </section>
+
+    <section>
+      <p>The various ways to use domains all boil down to the same thing</p>
+      <pre><code class="javascript" contenteditable>
+d.run(function () { /* risky code goes here*/ });
+// ...is the same as...
+d.bind(function() {})(); // &lt;-- invoke immediatly
+// ...is the same as
+(function () { d.enter(); /* risky code */ d.exit(); }())
+      </code></pre>
+      <p><code>domain.enter()</code> and <code>domain.exit()</code>
+      are the key functions.</p>
+    </section>
+  </section>
+
+  <section>
+    <h3>Remember our friend the uncaught exception handler?</h3>
+    <p>The domain system installs an <code>uncaughtException</code> handler to ensure
+    that it catches all events. In certain rare circumstances, this doesn't
+    work (which is probably a bug).</p>
+  </section>
+
+  <section>
+    <h2>Caveats</h2>
+    <p>This works great, except when there are <code>EventEmitters</code>
+       created before the domains were created (e.g. database connections
+       with connection pools). Either use <code>domain.bind()</code> or bug
+       the package authors to update their code.</p>
+  </section>
+
+  <section>
+    <h2>Advanced topics</h2>
+    <ul>
+      <li>What I needed for New Relic</li>
+      <li>Abusing domains for global state</li>
+      <li>What library writers need to do</li>
+    </ul>
+  </section>
+
+  <section>
+    <h1>Questions</h1>
+  </section>
+  </div>
+</div>
+<script src="lib/js/head.min.js"></script>
+<script src="js/reveal.min.js"></script>
+<script>
+Reveal.initialize({
+  controls     : true,
+  progress     : true,
+  history      : true,
+  theme        : Reveal.getQueryHash().theme,
+  transition   : Reveal.getQueryHash().transition || 'default',
+  dependencies : [
+    // Cross-browser shim that fully implements classList - https://github.com/eligrey/classList.js/
+    { src: 'lib/js/classList.js', condition: function() { return !document.body.classList; } },
+    // Interpret Markdown in <section> elements
+    { src: 'plugin/markdown/showdown.js', condition: function() { return !!document.querySelector( '[data-markdown]' ); } },
+    { src: 'plugin/markdown/markdown.js', condition: function() { return !!document.querySelector( '[data-markdown]' ); } },
+    // Syntax highlight for <code> elements
+    { src: 'plugin/highlight/highlight.js', async: true, callback: function() { hljs.initHighlightingOnLoad(); } },
+    // Zoom in and out with Alt+click
+    { src: 'plugin/zoom-js/zoom.js', async: true, condition: function() { return !!document.body.classList; } }
+  ]
+});
+</script>
+</body>
+</html>
